@@ -14,11 +14,23 @@ export function useAuth() {
 
   const logoutMutation = useMutation({
     mutationFn: async () => {
-      await apiRequest("POST", "/api/auth/logout");
+      try {
+        await apiRequest("POST", "/api/auth/logout");
+      } catch (e) {
+        // Fallback GET logout if needed
+        await fetch("/api/logout", { method: "GET", credentials: "include" });
+      }
     },
     onSuccess: () => {
       queryClient.setQueryData(["/api/auth/user"], null);
+      queryClient.removeQueries();
       setLocation("/");
+      window.location.href = "/";
+    },
+    onError: () => {
+      queryClient.setQueryData(["/api/auth/user"], null);
+      queryClient.removeQueries();
+      window.location.href = "/";
     },
   });
 

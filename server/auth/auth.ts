@@ -187,15 +187,41 @@ export async function setupAuth(app: Express) {
     }
   });
 
-  // Logout route
-  app.get("/api/logout", (req, res) => {
-    req.logOut((err) => {
+  // Robust logout handlers supporting all endpoints and methods
+  const handleLogout = (req: any, res: any) => {
+    if (req.session) {
+      delete req.session.is2faVerified;
+      delete req.session.pending2faUserId;
+    }
+    req.logOut((err: any) => {
       if (err) {
         return res.status(500).json({ message: "Logout failed" });
       }
-      res.redirect("/");
+      if (req.session) {
+        req.session.destroy((destroyErr: any) => {
+          if (destroyErr) {
+            console.error("Error destroying session on logout:", destroyErr);
+          }
+          res.clearCookie("connect.sid", { path: "/" });
+          if (req.method === "POST" || req.xhr || req.headers.accept?.includes("json")) {
+            return res.status(200).json({ message: "Logged out successfully" });
+          } else {
+            return res.redirect("/");
+          }
+        });
+      } else {
+        res.clearCookie("connect.sid", { path: "/" });
+        if (req.method === "POST" || req.xhr || req.headers.accept?.includes("json")) {
+          return res.status(200).json({ message: "Logged out successfully" });
+        } else {
+          return res.redirect("/");
+        }
+      }
     });
-  });
+  };
+
+  app.post(["/api/auth/logout", "/api/logout", "/auth/logout", "/logout"], handleLogout);
+  app.get(["/api/auth/logout", "/api/logout", "/auth/logout", "/logout"], handleLogout);
 }
 
 export const isAuthenticated: RequestHandler = async (req: any, res, next) => {

@@ -865,14 +865,39 @@ async function setupAuth(app) {
       res.status(500).json({ message: "Registration failed" });
     }
   });
-  app.get("/api/logout", (req, res) => {
+  const handleLogout = (req, res) => {
+    if (req.session) {
+      delete req.session.is2faVerified;
+      delete req.session.pending2faUserId;
+    }
     req.logOut((err) => {
       if (err) {
         return res.status(500).json({ message: "Logout failed" });
       }
-      res.redirect("/");
+      if (req.session) {
+        req.session.destroy((destroyErr) => {
+          if (destroyErr) {
+            console.error("Error destroying session on logout:", destroyErr);
+          }
+          res.clearCookie("connect.sid", { path: "/" });
+          if (req.method === "POST" || req.xhr || req.headers.accept?.includes("json")) {
+            return res.status(200).json({ message: "Logged out successfully" });
+          } else {
+            return res.redirect("/");
+          }
+        });
+      } else {
+        res.clearCookie("connect.sid", { path: "/" });
+        if (req.method === "POST" || req.xhr || req.headers.accept?.includes("json")) {
+          return res.status(200).json({ message: "Logged out successfully" });
+        } else {
+          return res.redirect("/");
+        }
+      }
     });
-  });
+  };
+  app.post(["/api/auth/logout", "/api/logout", "/auth/logout", "/logout"], handleLogout);
+  app.get(["/api/auth/logout", "/api/logout", "/auth/logout", "/logout"], handleLogout);
 }
 var isAuthenticated = async (req, res, next) => {
   if (req.isAuthenticated()) {
@@ -1141,17 +1166,6 @@ If you did not request this password reset, please disregard this email. Your pa
 import { z as z2 } from "zod";
 var requestCooldowns = /* @__PURE__ */ new Map();
 async function setupAuthRoutes(app) {
-  app.get("/api/logout", (req, res) => {
-    if (req.session) {
-      delete req.session.is2faVerified;
-    }
-    req.logOut((err) => {
-      if (err) {
-        return res.status(500).json({ message: "Logout failed" });
-      }
-      res.redirect("/");
-    });
-  });
   app.post("/api/auth/forgot-password", async (req, res) => {
     try {
       const emailSchema = z2.object({

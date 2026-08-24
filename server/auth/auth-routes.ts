@@ -12,19 +12,7 @@ import { z } from "zod";
 const requestCooldowns = new Map<string, number>();
 
 export async function setupAuthRoutes(app: Express) {
-  // Logout route
-  app.get("/api/logout", (req: any, res) => {
-    // Clear 2FA verification on logout
-    if (req.session) {
-      delete req.session.is2faVerified;
-    }
-    req.logOut((err: any) => {
-      if (err) {
-        return res.status(500).json({ message: "Logout failed" });
-      }
-      res.redirect("/");
-    });
-  });
+
 
   // Forgot password route - generates secure token & sends email
   app.post("/api/auth/forgot-password", async (req, res) => {
