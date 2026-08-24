@@ -10,16 +10,33 @@ import { Strategy as LocalStrategy } from "passport-local";
 
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-  const sessionStore = pool
-    ? new (connectPgSimple(session))({
-        pool: pool,
+  let sessionStore: any;
+
+  if (process.env.DATABASE_URL) {
+    try {
+      const PgSession = connectPgSimple(session);
+      sessionStore = new PgSession({
+        conString: process.env.DATABASE_URL,
         tableName: "sessions",
-        createTableIfMissing: false,
+        createTableIfMissing: true,
         ttl: sessionTtl / 1000,
-      })
-    : new (MemoryStore(session))({
-        checkPeriod: sessionTtl,
+        pruneSessionInterval: false,
       });
+
+      if (sessionStore && typeof sessionStore.on === "function") {
+        sessionStore.on("error", (err: any) => {
+          console.error("Session store error (handled):", err);
+        });
+      }
+    } catch (err) {
+      console.error("Failed to initialize PgSession, falling back to MemoryStore:", err);
+      const MemoryStoreSession = MemoryStore(session);
+      sessionStore = new MemoryStoreSession({ checkPeriod: sessionTtl });
+    }
+  } else {
+    const MemoryStoreSession = MemoryStore(session);
+    sessionStore = new MemoryStoreSession({ checkPeriod: sessionTtl });
+  }
   const secret = process.env.SESSION_SECRET || "dev-secret-key-for-development";
   if (!secret) {
     throw new Error("SESSION_SECRET must be set");

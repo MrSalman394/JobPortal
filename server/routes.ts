@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./core/storage";
 import { setupAuth, isAuthenticated, requireRole } from "./auth/auth";
 import { setupAuthRoutes } from "./auth/auth-routes";
-import { insertQualificationSchema, insertCompanySchema, insertJobSchema, insertApplicationSchema } from "@shared/schema";
+import { insertQualificationSchema, insertCompanySchema, insertJobSchema, insertApplicationSchema } from "../shared/schema";
 import PDFDocument from "pdfkit";
 
 // Helper to calculate match score based on qualifications

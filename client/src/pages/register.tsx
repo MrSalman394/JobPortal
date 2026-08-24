@@ -62,8 +62,15 @@ export default function Register() {
         credentials: "include",
       });
       if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.message || "Registration failed");
+        let errorMsg = "Registration failed";
+        try {
+          const error = await res.json();
+          errorMsg = error.message || errorMsg;
+        } catch {
+          const text = await res.text();
+          errorMsg = text || errorMsg;
+        }
+        throw new Error(errorMsg);
       }
       return res.json();
     },

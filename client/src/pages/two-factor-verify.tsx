@@ -25,8 +25,15 @@ export default function TwoFactorVerify({ sessionId, onSuccess }: TwoFactorVerif
         credentials: "include",
       });
       if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.message || "Invalid code");
+        let errorMsg = "Invalid code";
+        try {
+          const error = await res.json();
+          errorMsg = error.message || errorMsg;
+        } catch {
+          const text = await res.text();
+          errorMsg = text || errorMsg;
+        }
+        throw new Error(errorMsg);
       }
       return res.json();
     },

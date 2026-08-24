@@ -21,7 +21,7 @@ import {
   type InsertApplication,
   type Review,
   type CompanyReview,
-} from "@shared/schema";
+} from "../../shared/schema";
 import { db } from "./db";
 import { eq, and, desc, sql, ilike, or, inArray } from "drizzle-orm";
 
