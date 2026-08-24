@@ -516,7 +516,7 @@ export default function EmployerCompany() {
                             }
                           }}>
                             <DialogTrigger asChild>
-                              <Button variant="link" size="sm" className="h-auto p-0 text-xs text-primary font-bold">
+                              <Button variant="ghost" size="sm" className="h-auto p-0 text-xs text-primary font-bold">
                                 <Reply className="h-3 w-3 mr-1" /> Reply to feedback
                               </Button>
                             </DialogTrigger>

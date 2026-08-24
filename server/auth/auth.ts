@@ -2,16 +2,23 @@ import bcrypt from "bcryptjs";
 import { storage } from "../core/storage";
 import type { Express, RequestHandler } from "express";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
 import MemoryStore from "memorystore";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-  const memoryStore = MemoryStore(session);
-  const sessionStore = new memoryStore({
-    checkPeriod: sessionTtl,
-  });
+  const sessionStore = process.env.DATABASE_URL
+    ? new (connectPgSimple(session))({
+        conString: process.env.DATABASE_URL,
+        tableName: "sessions",
+        createTableIfMissing: false,
+        ttl: sessionTtl / 1000,
+      })
+    : new (MemoryStore(session))({
+        checkPeriod: sessionTtl,
+      });
   const secret = process.env.SESSION_SECRET || "dev-secret-key-for-development";
   if (!secret) {
     throw new Error("SESSION_SECRET must be set");
@@ -95,11 +102,13 @@ export async function setupAuth(app: Express) {
         const session = req.session as any;
         // If 2FA is enabled AND not verified in this session yet
         if (twoFa?.isEnabled && !session.is2faVerified) {
-          // Store basic user info for verification step but DO NOT log them in yet
-          // We clear any existing user from the request to be safe
-          return res.json({ 
-            user: { id: user.id, email: user.email, role: user.role }, 
-            requiresTwoFa: true 
+          session.pending2faUserId = user.id;
+          return req.session.save((err: any) => {
+            if (err) console.error("Error saving session for pending 2FA:", err);
+            return res.json({ 
+              user: { id: user.id, email: user.email, role: user.role, firstName: user.firstName, lastName: user.lastName }, 
+              requiresTwoFa: true 
+            });
           });
         }
 
@@ -126,8 +135,10 @@ export async function setupAuth(app: Express) {
         return res.status(400).json({ message: "Missing required fields" });
       }
 
+      const normalizedEmail = email.trim().toLowerCase();
+
       // Check if user already exists
-      const existingUser = await storage.getUserByEmail(email);
+      const existingUser = await storage.getUserByEmail(normalizedEmail);
       if (existingUser) {
         return res.status(400).json({ message: "Email already registered" });
       }
@@ -138,11 +149,11 @@ export async function setupAuth(app: Express) {
       // Create user
       const user = await storage.createUser({
         id: undefined as any,
-        email,
+        email: normalizedEmail,
         password: hashedPassword,
-        firstName,
-        lastName,
-        phone: phone || undefined,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        phone: phone ? phone.trim() : undefined,
       });
 
       // Log user in

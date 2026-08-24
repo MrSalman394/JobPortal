@@ -492,7 +492,7 @@ export default function EmployerDashboard() {
                             {app.user.firstName} {app.user.lastName}
                           </p>
                           <p className="text-xs text-muted-foreground truncate">
-                            {formatDistanceToNow(new Date(app.createdAt), { addSuffix: true })}
+                            {formatDistanceToNow(new Date(app.createdAt ?? Date.now()), { addSuffix: true })}
                           </p>
                         </div>
                         <Badge variant="outline" className="capitalize text-xs flex-shrink-0">

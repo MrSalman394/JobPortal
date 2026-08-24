@@ -5,9 +5,11 @@ import { randomBytes } from "crypto";
 import speakeasy from "speakeasy";
 import QRCode from "qrcode";
 import { isAuthenticated } from "./auth";
+import { sendPasswordResetEmail } from "../core/email";
+import { z } from "zod";
 
-// Store reset codes in memory with expiration (in production, use database)
-const resetCodes = new Map<string, { userId: string; expiresAt: Date }>();
+// In-memory rate limiting map for forgot-password requests (cooldown: 30 seconds per email)
+const requestCooldowns = new Map<string, number>();
 
 export async function setupAuthRoutes(app: Express) {
   // Logout route
@@ -24,62 +26,152 @@ export async function setupAuthRoutes(app: Express) {
     });
   });
 
-  // Forgot password route - generates a reset code
+  // Forgot password route - generates secure token & sends email
   app.post("/api/auth/forgot-password", async (req, res) => {
     try {
-      const { email } = req.body;
-      const user = await storage.getUserByEmail(email);
-      
-      if (!user) {
-        return res.status(200).json({ message: "If email exists, reset code has been sent" });
+      const emailSchema = z.object({
+        email: z.string().email("Please provide a valid email address"),
+      });
+
+      const parsed = emailSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: parsed.error.errors[0]?.message || "Invalid email" });
       }
 
-      // Generate a 6-digit reset code
-      const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 1000 * 60 * 15); // 15 minutes
-      
-      // Store the reset code
-      resetCodes.set(resetCode, { userId: user.id, expiresAt });
-      
-      // Log the code to console for testing
-      console.log(`[PASSWORD RESET] Code: ${resetCode} for ${email}`);
-      
-      // For production, you can also create a token in database
-      const token = randomBytes(32).toString("hex");
-      await storage.createPasswordResetToken(user.id, token, expiresAt);
-      
-      res.json({ 
-        message: "Reset code generated",
-        resetCode: resetCode, // Return code to display on frontend
-        expiresIn: 15 * 60 // 15 minutes in seconds
+      const email = parsed.data.email.trim().toLowerCase();
+
+      // Rate limit / cooldown per email to prevent spam (30s)
+      const now = Date.now();
+      const lastRequest = requestCooldowns.get(email);
+      if (lastRequest && now - lastRequest < 30000) {
+        const remainingSeconds = Math.ceil((30000 - (now - lastRequest)) / 1000);
+        return res.status(429).json({
+          message: `Please wait ${remainingSeconds} seconds before requesting another reset email.`,
+        });
+      }
+      requestCooldowns.set(email, now);
+
+      const user = await storage.getUserByEmail(email);
+
+      if (user && !user.isBlocked) {
+        // Generate a 64-character cryptographically secure token
+        const token = randomBytes(32).toString("hex");
+        const expiresInMinutes = 60;
+        const expiresAt = new Date(Date.now() + 1000 * 60 * expiresInMinutes);
+
+        // Store token in PostgreSQL database
+        await storage.createPasswordResetToken(user.id, token, expiresAt);
+
+        // Determine base URL
+        const origin = req.headers.origin || `${req.protocol}://${req.get("host")}`;
+        const resetUrl = `${origin}/reset-password?token=${token}`;
+
+        const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
+        await sendPasswordResetEmail({
+          to: user.email,
+          name: fullName || undefined,
+          resetUrl,
+          expiresInMinutes,
+        });
+      }
+
+      // Always return anti-enumeration response to protect user privacy
+      return res.status(200).json({
+        message: "If an account with that email exists, password reset instructions have been sent to it.",
       });
     } catch (error) {
       console.error("Forgot password error:", error);
-      res.status(500).json({ message: "Failed to process request" });
+      res.status(500).json({ message: "An unexpected error occurred. Please try again later." });
     }
   });
 
-  // Reset password route
-  app.post("/api/auth/reset-password", async (req, res) => {
+  // Verify reset token route (used on reset-password page load)
+  app.get("/api/auth/verify-reset-token", async (req, res) => {
     try {
-      const { resetCode, password } = req.body;
-      
-      // Check if reset code exists and is valid
-      const resetData = resetCodes.get(resetCode);
-      if (!resetData || resetData.expiresAt < new Date()) {
-        return res.status(400).json({ message: "Invalid or expired reset code" });
+      const token = (req.query.token as string)?.trim();
+      if (!token) {
+        return res.status(400).json({ valid: false, message: "Reset token is required" });
       }
 
-      const hashedPassword = await bcrypt.hash(password, 10);
-      await storage.updateUserPassword(resetData.userId, hashedPassword);
-      
-      // Clean up the reset code
-      resetCodes.delete(resetCode);
+      const resetTokenRecord = await storage.getPasswordResetToken(token);
+      if (!resetTokenRecord) {
+        return res.status(400).json({
+          valid: false,
+          message: "This password reset link is invalid or has already been used.",
+        });
+      }
 
-      res.json({ message: "Password reset successfully" });
+      if (new Date(resetTokenRecord.expiresAt) < new Date()) {
+        await storage.deletePasswordResetToken(token);
+        return res.status(400).json({
+          valid: false,
+          message: "This password reset link has expired. Please request a new one.",
+        });
+      }
+
+      const user = await storage.getUser(resetTokenRecord.userId);
+      if (!user) {
+        return res.status(400).json({ valid: false, message: "User not found." });
+      }
+
+      return res.json({
+        valid: true,
+        email: user.email,
+      });
+    } catch (error) {
+      console.error("Verify reset token error:", error);
+      res.status(500).json({ valid: false, message: "Failed to verify reset token." });
+    }
+  });
+
+  // Reset password route - updates user password with token
+  app.post("/api/auth/reset-password", async (req, res) => {
+    try {
+      const resetSchema = z.object({
+        token: z.string().min(1, "Reset token is required"),
+        password: z
+          .string()
+          .min(8, "Password must be at least 8 characters long")
+          .max(100, "Password is too long"),
+      });
+
+      const parsed = resetSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: parsed.error.errors[0]?.message || "Invalid input" });
+      }
+
+      const { token, password } = parsed.data;
+
+      // Verify token in PostgreSQL
+      const resetTokenRecord = await storage.getPasswordResetToken(token);
+      if (!resetTokenRecord) {
+        return res.status(400).json({
+          message: "This password reset link is invalid or has already been used. Please request a new one.",
+        });
+      }
+
+      if (new Date(resetTokenRecord.expiresAt) < new Date()) {
+        await storage.deletePasswordResetToken(token);
+        return res.status(400).json({
+          message: "This password reset link has expired. Please request a new one.",
+        });
+      }
+
+      // Hash the new password with bcrypt
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Update password in database
+      await storage.updateUserPassword(resetTokenRecord.userId, hashedPassword);
+
+      // Invalidate the token so it cannot be reused
+      await storage.deletePasswordResetToken(token);
+
+      return res.json({
+        message: "Your password has been successfully reset. You can now sign in with your new password.",
+      });
     } catch (error) {
       console.error("Reset password error:", error);
-      res.status(500).json({ message: "Failed to reset password" });
+      res.status(500).json({ message: "Failed to reset password. Please try again." });
     }
   });
 
@@ -90,19 +182,29 @@ export async function setupAuthRoutes(app: Express) {
       const user = await storage.getUser(userId);
 
       const secret = speakeasy.generateSecret({
-        name: `JobConnect (${user?.email})`,
+        name: `JobConnect (${user?.email || "User"})`,
         issuer: "JobConnect",
         length: 32,
       });
 
+      // Generate 8 single-use emergency recovery backup codes
+      const backupCodes = Array.from({ length: 8 }, () => randomBytes(4).toString("hex").toUpperCase());
+
       const qrCode = await QRCode.toDataURL(secret.otpauth_url!);
 
-      // Store secret in session for verification
+      // Store secret and backup codes in session pending confirmation
+      req.session.pending2fa = {
+        secret: secret.base32,
+        backupCodes,
+      };
       req.session.twoFactorSecret = secret.base32;
+
+      await new Promise<void>((resolve) => req.session.save(() => resolve()));
 
       res.json({
         secret: secret.base32,
         qrCode,
+        backupCodes,
       });
     } catch (error) {
       console.error("2FA setup error:", error);
@@ -116,49 +218,46 @@ export async function setupAuthRoutes(app: Express) {
       const userId = req.user?.id || req.user?.claims?.sub;
       const { code } = req.body;
 
-      const sessionSecret = req.session?.twoFactorSecret;
+      const pending = req.session?.pending2fa;
+      const sessionSecret = pending?.secret || req.session?.twoFactorSecret;
       if (!sessionSecret) {
-        return res.status(400).json({ message: "2FA setup not initiated" });
+        return res.status(400).json({ message: "2FA setup session expired. Please refresh and try again." });
       }
 
-      // Verify the code is valid
+      const cleanCode = (code || "").toString().trim().replace(/\s+/g, "");
+
+      // Verify the code is valid (window: 2 allows ±60s clock drift)
       const isValid = speakeasy.totp.verify({
         secret: sessionSecret,
         encoding: "base32",
-        token: code,
+        token: cleanCode,
         window: 2,
       });
 
       if (!isValid) {
-        return res.status(400).json({ message: "Invalid 2FA code" });
+        return res.status(400).json({ message: "Invalid 6-digit code. Please verify your authenticator app time." });
       }
 
-      await storage.enableTwoFactor(userId, sessionSecret);
+      const backupCodes = pending?.backupCodes || [];
+      await storage.enableTwoFactor(userId, sessionSecret, backupCodes);
       
-      // Clean up session
+      // Clean up temporary session storage
+      delete req.session.pending2fa;
       delete req.session.twoFactorSecret;
-      // Also mark as verified for the current session
       req.session.is2faVerified = true;
       
-      // EXPLICITLY save session and wait for it
       await new Promise<void>((resolve, reject) => {
         req.session.save((err: any) => {
-          if (err) {
-            console.error("Session save error:", err);
-            reject(err);
-          } else {
-            console.log("Session saved successfully after 2FA enable");
-            resolve();
-          }
+          if (err) reject(err);
+          else resolve();
         });
       });
 
-      // Update the user in the session
       const user = await storage.getUser(userId);
-      req.login(user, (err: any) => {
-        if (err) console.error("Error updating user session after 2FA enable:", err);
-        // Force a re-fetch of the user data in the frontend
-        res.json({ message: "2FA enabled successfully", user });
+      res.json({ 
+        message: "2FA enabled successfully", 
+        user,
+        backupCodes
       });
     } catch (error) {
       console.error("Enable 2FA error:", error);
@@ -175,41 +274,35 @@ export async function setupAuthRoutes(app: Express) {
       // Verify password for security
       const user = await storage.getUser(userId);
       if (!user?.password) {
-        return res.status(400).json({ message: "Invalid user" });
+        return res.status(400).json({ message: "Invalid user account" });
       }
 
       const isPasswordValid = await bcrypt.compare(password, user.password);
       if (!isPasswordValid) {
-        return res.status(401).json({ message: "Invalid password" });
+        return res.status(401).json({ message: "Incorrect password" });
       }
 
-      // Verify the 2FA code
+      // If code was provided, verify it too
       const twoFa = await storage.getTwoFactorSecret(userId);
-      if (!twoFa?.isEnabled || !twoFa?.secret) {
-        return res.status(400).json({ message: "2FA not enabled" });
-      }
+      if (code && twoFa?.secret) {
+        const cleanCode = (code || "").toString().trim().replace(/\s+/g, "");
+        const isCodeValid = speakeasy.totp.verify({
+          secret: twoFa.secret,
+          encoding: "base32",
+          token: cleanCode,
+          window: 2,
+        });
 
-      const isCodeValid = speakeasy.totp.verify({
-        secret: twoFa.secret,
-        encoding: "base32",
-        token: code,
-        window: 2,
-      });
-
-      if (!isCodeValid) {
-        return res.status(400).json({ message: "Invalid 2FA code" });
+        if (!isCodeValid && !(await storage.consumeBackupCode(userId, cleanCode))) {
+          return res.status(400).json({ message: "Invalid 2FA code" });
+        }
       }
 
       await storage.disableTwoFactor(userId);
-      // Also clear verified status in session
+      
       if (req.session) {
         req.session.is2faVerified = false;
-        await new Promise<void>((resolve, reject) => {
-          req.session.save((err: any) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        });
+        await new Promise<void>((resolve) => req.session.save(() => resolve()));
       }
       
       res.json({ message: "2FA disabled successfully" });
@@ -225,15 +318,13 @@ export async function setupAuthRoutes(app: Express) {
       const userId = req.user?.id || req.user?.claims?.sub;
       const twoFa = await storage.getTwoFactorSecret(userId);
       
-      // Prevent browser caching of this status
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
-      res.setHeader('Surrogate-Control', 'no-store');
 
       res.json({ 
-        isEnabled: !!twoFa?.isEnabled,
-        isVerifiedInSession: !!req.session.is2faVerified 
+        isEnabled: Boolean(twoFa?.isEnabled),
+        isVerifiedInSession: Boolean(req.session?.is2faVerified)
       });
     } catch (error) {
       console.error("2FA status error:", error);
@@ -241,48 +332,63 @@ export async function setupAuthRoutes(app: Express) {
     }
   });
 
-  // Verify 2FA during login
+  // Verify 2FA during login (supports both 6-digit TOTP app codes and 8-char backup codes)
   app.post("/api/auth/2fa/verify", async (req: any, res) => {
     try {
-      const { code, userId } = req.body;
+      const { code } = req.body;
+      const userId = req.body.userId || req.session?.pending2faUserId;
 
       if (!userId || !code) {
-        return res.status(400).json({ message: "Missing required fields" });
+        return res.status(400).json({ message: "Verification code and User ID are required" });
       }
 
-      // Get user's 2FA secret
       const twoFa = await storage.getTwoFactorSecret(userId);
       if (!twoFa?.isEnabled || !twoFa?.secret) {
-        return res.status(400).json({ message: "2FA not enabled for this user" });
+        return res.status(400).json({ message: "2FA is not active on this account" });
       }
 
-      // Verify the code
-      const isValid = speakeasy.totp.verify({
-        secret: twoFa.secret,
-        encoding: "base32",
-        token: code,
-        window: 2,
-      });
+      const cleanCode = (code || "").toString().trim().replace(/\s+/g, "");
+      let isValid = false;
+
+      // 1. Try 6-digit TOTP code
+      if (/^\d{6}$/.test(cleanCode)) {
+        isValid = speakeasy.totp.verify({
+          secret: twoFa.secret,
+          encoding: "base32",
+          token: cleanCode,
+          window: 2, // ±60s clock drift
+        });
+      }
+
+      // 2. Try single-use emergency backup code
+      if (!isValid) {
+        isValid = await storage.consumeBackupCode(userId, cleanCode);
+      }
 
       if (!isValid) {
-        return res.status(400).json({ message: "Invalid 2FA code" });
+        return res.status(400).json({ message: "Invalid or expired 2FA code. Please check your authenticator app." });
       }
 
-      // Mark as verified in session
-      req.session.is2faVerified = true;
-      await new Promise<void>((resolve, reject) => {
-        req.session.save((err: any) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-      
-      // Also fetch the user to return in the response
       const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(400).json({ message: "User account not found" });
+      }
 
-      res.json({ 
-        message: "2FA verified successfully",
-        user
+      // Mark verified in session and establish login
+      req.session.is2faVerified = true;
+      delete req.session.pending2faUserId;
+
+      req.logIn(user, (err: any) => {
+        if (err) {
+          console.error("Error establishing login session in 2FA:", err);
+          return res.status(500).json({ message: "Failed to log in" });
+        }
+        req.session.save(() => {
+          res.json({ 
+            message: "2FA verified successfully",
+            user
+          });
+        });
       });
     } catch (error) {
       console.error("2FA verify error:", error);

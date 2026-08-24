@@ -72,7 +72,7 @@ export interface IStorage {
   getApplicationByUserAndJob(userId: string, jobId: string): Promise<Application | undefined>;
   createApplication(data: InsertApplication & { userId: string; jobId: string }): Promise<Application>;
   updateApplicationStatus(id: string, status: string): Promise<Application | undefined>;
-  deleteApplication(id: string, userId: string): Promise<boolean>;
+  deleteApplication(id: string, userId?: string): Promise<boolean>;
 
   // Company reviews
   createCompanyReview(data: any): Promise<any>;
@@ -134,7 +134,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.email, email));
+    const [user] = await db.select().from(users).where(ilike(users.email, email.trim()));
     return user;
   }
 
@@ -267,8 +267,10 @@ export class DatabaseStorage implements IStorage {
     }));
   }
 
-  async deleteApplication(id: string, userId: string): Promise<boolean> {
-    await db.delete(applications).where(and(eq(applications.id, id), eq(applications.userId, userId)));
+  async deleteApplication(id: string, userId?: string): Promise<boolean> {
+    await db
+      .delete(applications)
+      .where(userId ? and(eq(applications.id, id), eq(applications.userId, userId)) : eq(applications.id, id));
     return true;
   }
 
@@ -545,6 +547,8 @@ export class DatabaseStorage implements IStorage {
 
   // Password reset token operations
   async createPasswordResetToken(userId: string, token: string, expiresAt: Date): Promise<any> {
+    // Invalidate any existing tokens for this user first
+    await db.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, userId));
     const [resetToken] = await db.insert(passwordResetTokens).values({ userId, token, expiresAt }).returning();
     return resetToken;
   }
@@ -569,16 +573,34 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async enableTwoFactor(userId: string, secret: string): Promise<any> {
-    const [updated] = await db.update(twoFactorSecrets)
-      .set({ isEnabled: true, secret, updatedAt: new Date() })
-      .where(eq(twoFactorSecrets.userId, userId))
+  async enableTwoFactor(userId: string, secret: string, backupCodes?: string[]): Promise<any> {
+    const existing = await db.select().from(twoFactorSecrets).where(eq(twoFactorSecrets.userId, userId));
+    const backupCodesJson = backupCodes ? JSON.stringify(backupCodes) : null;
+
+    if (existing.length > 0) {
+      const [updated] = await db
+        .update(twoFactorSecrets)
+        .set({
+          isEnabled: true,
+          secret,
+          backupCodes: backupCodesJson,
+          updatedAt: new Date(),
+        })
+        .where(eq(twoFactorSecrets.userId, userId))
+        .returning();
+      return updated;
+    }
+
+    const [created] = await db
+      .insert(twoFactorSecrets)
+      .values({
+        userId,
+        secret,
+        isEnabled: true,
+        backupCodes: backupCodesJson,
+      })
       .returning();
-    
-    // Explicitly update the user table as well if needed (optional, but good for reactivity)
-    await db.update(users).set({ updatedAt: new Date() }).where(eq(users.id, userId));
-    
-    return updated;
+    return created;
   }
 
   async getTwoFactorSecret(userId: string): Promise<any> {
@@ -587,8 +609,33 @@ export class DatabaseStorage implements IStorage {
   }
 
   async disableTwoFactor(userId: string): Promise<boolean> {
-    await db.update(twoFactorSecrets).set({ isEnabled: false, updatedAt: new Date() }).where(eq(twoFactorSecrets.userId, userId));
+    await db
+      .update(twoFactorSecrets)
+      .set({ isEnabled: false, backupCodes: null, updatedAt: new Date() })
+      .where(eq(twoFactorSecrets.userId, userId));
     return true;
+  }
+
+  async consumeBackupCode(userId: string, code: string): Promise<boolean> {
+    const twoFa = await this.getTwoFactorSecret(userId);
+    if (!twoFa || !twoFa.backupCodes) return false;
+
+    try {
+      const codes: string[] = JSON.parse(twoFa.backupCodes);
+      const normalizedCode = code.trim().toLowerCase();
+      const index = codes.findIndex((c: string) => c.toLowerCase() === normalizedCode);
+      if (index === -1) return false;
+
+      // Remove the consumed single-use backup code
+      codes.splice(index, 1);
+      await db
+        .update(twoFactorSecrets)
+        .set({ backupCodes: JSON.stringify(codes), updatedAt: new Date() })
+        .where(eq(twoFactorSecrets.userId, userId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async createCompanyReview(data: any): Promise<CompanyReview> {
