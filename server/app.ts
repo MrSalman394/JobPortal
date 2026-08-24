@@ -1,13 +1,8 @@
 import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import cookieParser from "cookie-parser";
-import { createServer, type Server } from "http";
+import { createServer } from "http";
 import { registerRoutes } from "./routes";
-import { serveStatic } from "./config/static";
-
-type CreateAppOptions = {
-  serveClient?: boolean;
-};
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -20,19 +15,10 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-export async function createApp(options: CreateAppOptions = {}) {
+export async function createApp() {
   const app = express();
   app.use(cookieParser());
   const httpServer = createServer(app);
-
-  if (!options.serveClient) {
-    app.use((req, _res, next) => {
-      if (req.url && !req.url.startsWith("/api") && !req.url.startsWith("/_")) {
-        req.url = `/api${req.url.startsWith("/") ? "" : "/"}${req.url}`;
-      }
-      next();
-    });
-  }
 
   app.use(
     express.json({
@@ -82,15 +68,6 @@ export async function createApp(options: CreateAppOptions = {}) {
     }
     console.error(err);
   });
-
-  if (options.serveClient) {
-    if (process.env.NODE_ENV === "production") {
-      serveStatic(app);
-    } else {
-      const { setupVite } = await import("./config/vite");
-      await setupVite(httpServer, app);
-    }
-  }
 
   return { app, httpServer };
 }

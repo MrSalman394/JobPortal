@@ -5,7 +5,7 @@ let appPromise: ReturnType<typeof createApp> | null = null;
 
 function getApp() {
   if (!appPromise) {
-    appPromise = createApp({ serveClient: false });
+    appPromise = createApp();
   }
   return appPromise;
 }
