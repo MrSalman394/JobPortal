@@ -25,6 +25,15 @@ export async function createApp(options: CreateAppOptions = {}) {
   app.use(cookieParser());
   const httpServer = createServer(app);
 
+  if (!options.serveClient) {
+    app.use((req, _res, next) => {
+      if (req.url && !req.url.startsWith("/api") && !req.url.startsWith("/_")) {
+        req.url = `/api${req.url.startsWith("/") ? "" : "/"}${req.url}`;
+      }
+      next();
+    });
+  }
+
   app.use(
     express.json({
       limit: "50mb",
