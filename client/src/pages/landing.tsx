@@ -54,7 +54,7 @@ import teamImage from "@assets/images/diverse_professionals_collaborating.png";
 import hanzlaPic from "@assets/images/hanzla.png";
 import mariamPic from "@assets/images/mariam.png";
 import safiaPic from "@assets/images/safia.png";
-import salmanPic from "@assets/images/salman.png";
+import salmanPic from "@assets/images/salman1.jpeg";
 
 // --- 3D PARTICLE & ROTATING GEOMETRIC MATRIX CANVAS ---
 function Cyber3DCanvas() {
