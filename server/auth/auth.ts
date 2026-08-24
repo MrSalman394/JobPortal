@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { storage } from "../core/storage";
+import { pool } from "../core/db";
 import type { Express, RequestHandler } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
@@ -9,9 +10,9 @@ import { Strategy as LocalStrategy } from "passport-local";
 
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-  const sessionStore = process.env.DATABASE_URL
+  const sessionStore = pool
     ? new (connectPgSimple(session))({
-        conString: process.env.DATABASE_URL,
+        pool: pool,
         tableName: "sessions",
         createTableIfMissing: false,
         ttl: sessionTtl / 1000,
